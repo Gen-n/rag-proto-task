@@ -50,11 +50,14 @@ User Question
 
 ---
 
-## Environment Variables
+### Environment Variables
 
-Create a `.env` file in the project root.
+This project uses the Groq API.
 
-### Required
+Generate a free API key at:
+https://console.groq.com/keys
+
+Create a `.env` file in the project root and add your key:
 
 ```env
 GROQ_API_KEY=your_groq_api_key_here
