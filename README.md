@@ -50,6 +50,20 @@ User Question
 
 ---
 
+## Environment Variables
+
+Create a `.env` file in the project root.
+
+### Required
+
+```env
+GROQ_API_KEY=your_groq_api_key_here
+```
+
+The application will fail on startup if `GROQ_API_KEY` is not set.
+
+---
+
 ## Setup
 
 ```bash
