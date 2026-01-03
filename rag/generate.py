@@ -25,7 +25,13 @@ You MUST follow these rules:
 
 - Do NOT mention relevance scores.
 - Do NOT mention missing access to documents.
-- Every factual statement MUST include a citation like [Source N].
+
+CITATIONS (STRICT):
+- Every factual statement MUST include a citation in the exact format: [Source N]
+- If you cite multiple sources, DO NOT group them in one bracket.
+  Correct: [Source 1][Source 2]
+  Incorrect: [Source 1, Source 2]
+- Do not invent sources. Use only sources provided in the context.
 """
 
 
@@ -94,7 +100,17 @@ class AnswerGenerator:
 
             answer = response.choices[0].message.content
 
+            max_source = len(retrieved_docs)
+
+            # Normalize grouped citations like [Source 1, Source 2] -> [Source 1][Source 2]
+
             import re
+            answer = re.sub(
+                r'\[Source (\d+)(?:,\s*Source (\d+))+\]',
+                lambda m: ''.join(f"[Source {n}]" for n in re.findall(r'\d+', m.group(0))),
+                answer
+            )
+
             def strip_invalid_sources(text: str) -> str:
                 return re.sub(
                     r'\[Source (\d+)\]',
@@ -248,7 +264,7 @@ ANSWER:"""
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant that answers questions based on provided context. Always cite your sources."
+                        "content": SYSTEM_PROMPT
                     },
                     {
                         "role": "user",
