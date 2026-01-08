@@ -1,0 +1,3 @@
+{"id":"q1","question":"How many layers are used in the Transformer encoder and decoder?","expected_contains":["6","encoder","decoder"],"k":3}
+{"id":"q2","question":"What problem does positional encoding solve?","expected_contains":["position"],"k":5}
+{"id":"q3","question":"What are the main components of the Transformer encoder?","expected_contains":["self-attention","feed-forward"],"k":3}

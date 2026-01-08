@@ -4,16 +4,19 @@ Generates answers using LLM with source citations
 """
 
 import os
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
+
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Configuration
-LLM_MODEL = os.getenv('LLM_MODEL', 'llama-3.1-8b-instant')
-LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', 0.3))
-LLM_MAX_TOKENS = int(os.getenv('LLM_MAX_TOKENS', 500))
+LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", 0.3))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", 500))
+
 SYSTEM_PROMPT = """You are a strict retrieval-based QA system.
 
 You MUST follow these rules:
@@ -38,121 +41,124 @@ CITATIONS (STRICT):
 class AnswerGenerator:
     """Generates answers using LLM with citations"""
 
-    def __init__(self, model: str = LLM_MODEL):
+    def __init__(self, model: str = LLM_MODEL, client: Optional[Groq] = None):
         """
         Initialize the answer generator
 
         Args:
             model: Groq model to use
+            client: Optional injected Groq client (useful for tests)
         """
         self.model = model
-        api_key = os.getenv('GROQ_API_KEY')
+        self.client = client  # lazy init if None
 
+    # def _ensure_client(self) -> None:
+    #     """Initialize Groq client lazily (keeps unit tests independent of API keys)."""
+    #     if self.client is not None:
+    #         return
+    #
+    #     api_key = os.getenv("GROQ_API_KEY")
+    #     if not api_key:
+    #         raise ValueError("GROQ_API_KEY not found in environment variables")
+    #
+    #     self.client = Groq(api_key=api_key)
+
+    def _ensure_client(self) -> None:
+        """Initialize Groq client lazily (keeps unit tests independent of API keys)."""
+        if self.client is not None:
+            return
+
+        api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            raise ValueError("GROQ_API_KEY not found in environment variables")
+            raise RuntimeError(
+                "GROQ_API_KEY is required to generate answers. "
+                "Set it in a .env file or as an environment variable."
+            )
 
         self.client = Groq(api_key=api_key)
 
-    def generate_answer(
-        self, 
-        query: str, 
-        retrieved_docs: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_grouped_citations(answer: str) -> str:
         """
-        Generate an answer based on query and retrieved documents
+        Normalize grouped citations like:
+          [Source 1, Source 2] -> [Source 1][Source 2]
+        """
+        return re.sub(
+            r"\[Source (\d+)(?:,\s*Source (\d+))+\]",
+            lambda m: "".join(f"[Source {n}]" for n in re.findall(r"\d+", m.group(0))),
+            answer,
+        )
 
-        Args:
-            query: User's question
-            retrieved_docs: List of retrieved documents with content and metadata
+    @staticmethod
+    def _strip_invalid_sources(answer: str, max_source: int) -> str:
+        """Remove citations out of range: [Source N] where N > max_source."""
+        return re.sub(
+            r"\[Source (\d+)\]",
+            lambda m: m.group(0) if int(m.group(1)) <= max_source else "",
+            answer,
+        )
 
-        Returns:
-            Dictionary with answer and citations
+    def generate_answer(self, query: str, retrieved_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Generate an answer based on a query and retrieved documents
         """
         if not retrieved_docs:
             return {
-                'answer': "I couldn't find any relevant information to answer your question.",
-                'citations': []
+                "answer": "I couldn't find any relevant information to answer your question.",
+                "citations": [],
             }
 
-        # Prepare context from retrieved documents
         context = self._prepare_context(retrieved_docs)
-
-        # Create prompt
         prompt = self._create_prompt(query, context)
 
-        # Generate answer
+        # Ensure Groq client only when we actually need it
+        self._ensure_client()
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=LLM_TEMPERATURE,
-                max_tokens=LLM_MAX_TOKENS
+                max_tokens=LLM_MAX_TOKENS,
             )
 
-            answer = response.choices[0].message.content
+            answer = response.choices[0].message.content or ""
 
             max_source = len(retrieved_docs)
 
-            # Normalize grouped citations like [Source 1, Source 2] -> [Source 1][Source 2]
+            # Normalize and strip invalid citations (deterministic eval contract)
+            answer = self._normalize_grouped_citations(answer)
+            answer = self._strip_invalid_sources(answer, max_source=max_source)
 
-            import re
-            answer = re.sub(
-                r'\[Source (\d+)(?:,\s*Source (\d+))+\]',
-                lambda m: ''.join(f"[Source {n}]" for n in re.findall(r'\d+', m.group(0))),
-                answer
-            )
-
-            def strip_invalid_sources(text: str) -> str:
-                return re.sub(
-                    r'\[Source (\d+)\]',
-                    lambda m: m.group(0) if int(m.group(1)) <= max_source else '',
-                    text
-                )
-
-            answer = strip_invalid_sources(answer)
-
-            # Extract citations
             citations = self._extract_citations(answer, retrieved_docs)
 
             return {
-                'answer': answer,
-                'citations': citations,
-                'model': self.model
+                "answer": answer,
+                "citations": citations,
+                "model": self.model,
             }
 
         except Exception as e:
             return {
-                'answer': f"Error generating answer: {str(e)}",
-                'citations': []
+                "answer": f"Error generating answer: {str(e)}",
+                "citations": [],
             }
 
     def _prepare_context(self, retrieved_docs: List[Dict[str, Any]]) -> str:
-        """
-        Prepare context from retrieved documents
-
-        Args:
-            retrieved_docs: List of retrieved documents
-
-        Returns:
-            Formatted context string
-        """
+        """Prepare context from retrieved documents"""
         context_parts = []
 
         for idx, doc in enumerate(retrieved_docs, 1):
-            source = doc.get('source', 'Unknown')
-            page = doc.get('page') or doc.get('metadata', {}).get('page')
-            chunk_id = doc.get('chunk_id') or doc.get('metadata', {}).get('chunk_id')
-            chunk_index = doc.get('chunk_index') or doc.get('metadata', {}).get('chunk_index')
-            content = doc.get('content', '')
+            md = doc.get("metadata", {}) or {}
+
+            source = doc.get("source", md.get("source", "Unknown"))
+            page = doc.get("page", md.get("page"))
+            chunk_id = doc.get("chunk_id", md.get("chunk_id"))
+            chunk_index = doc.get("chunk_index", md.get("chunk_index"))
+            content = doc.get("content", "")
 
             locator = f"{source}"
             if page is not None:
@@ -162,23 +168,13 @@ class AnswerGenerator:
             elif chunk_index is not None:
                 locator += f", chunk={chunk_index}"
 
-            context_part = f"[Source {idx}] {locator}\n{content}\n"
-            context_parts.append(context_part)
+            context_parts.append(f"[Source {idx}] {locator}\n{content}\n")
 
         return "\n---\n".join(context_parts)
 
     def _create_prompt(self, query: str, context: str) -> str:
-        """
-        Create the prompt for the LLM
-
-        Args:
-            query: User's question
-            context: Prepared context from documents
-
-        Returns:
-            Formatted prompt
-        """
-        prompt = f"""CONTEXT:
+        """Create the prompt for the LLM"""
+        return f"""CONTEXT:
 {context}
 
 INSTRUCTIONS:
@@ -191,65 +187,34 @@ QUESTION: {query}
 
 ANSWER:"""
 
-        return prompt
+    def _extract_citations(self, answer: str, retrieved_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract and format citations from the answer"""
+        citations: List[Dict[str, Any]] = []
 
-    def _extract_citations(
-        self, 
-        answer: str, 
-        retrieved_docs: List[Dict[str, Any]]
-    ) -> List[Dict[str, str]]:
-        """
-        Extract and format citations from the answer
+        matches = re.finditer(r"\[Source (\d+)\]", answer)
+        cited_sources = {int(m.group(1)) for m in matches}
 
-        Args:
-            answer: Generated answer
-            retrieved_docs: Original retrieved documents
-
-        Returns:
-            List of citation dictionaries
-        """
-        citations = []
-
-        # Look for [Source N] patterns in the answer
-        import re
-        source_pattern = r'\[Source (\d+)\]'
-        matches = re.finditer(source_pattern, answer)
-
-        cited_sources = set()
-        for match in matches:
-            source_num = int(match.group(1))
-            cited_sources.add(source_num)
-
-        # Format citations for cited sources
         for source_num in sorted(cited_sources):
             if source_num <= len(retrieved_docs):
                 doc = retrieved_docs[source_num - 1]
+                md = doc.get("metadata", {}) or {}
 
-                md = doc.get('metadata', {}) or {}
-                citations.append({
-                    'source_number': source_num,
-                    'source': doc.get('source', md.get('source', 'Unknown')),
-                    'page': doc.get('page', md.get('page')),
-                    'chunk_id': doc.get('chunk_id', md.get('chunk_id')),
-                    'chunk_index': doc.get('chunk_index', md.get('chunk_index')),
-                })
+                citations.append(
+                    {
+                        "source_number": source_num,
+                        "source": doc.get("source", md.get("source", "Unknown")),
+                        "page": doc.get("page", md.get("page")),
+                        "chunk_id": doc.get("chunk_id", md.get("chunk_id")),
+                        "chunk_index": doc.get("chunk_index", md.get("chunk_index")),
+                    }
+                )
 
         return citations
 
-    def generate_answer_with_streaming(
-        self, 
-        query: str, 
-        retrieved_docs: List[Dict[str, Any]]
-    ):
+    def generate_answer_with_streaming(self, query: str, retrieved_docs: List[Dict[str, Any]]):
         """
-        Generate an answer with streaming (for future enhancement)
-
-        Args:
-            query: User's question
-            retrieved_docs: List of retrieved documents
-
-        Yields:
-            Answer chunks as they're generated
+        Generate an answer with streaming
+        NOTE: Streaming yields text chunks only; citations are not parsed here.
         """
         if not retrieved_docs:
             yield "I couldn't find any relevant information to answer your question."
@@ -258,27 +223,25 @@ ANSWER:"""
         context = self._prepare_context(retrieved_docs)
         prompt = self._create_prompt(query, context)
 
+        # Ensure Groq client for streaming path as well
+        self._ensure_client()
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
-                stream=True
+                stream=True,
             )
 
             for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
 
         except Exception as e:
             yield f"Error generating answer: {str(e)}"
